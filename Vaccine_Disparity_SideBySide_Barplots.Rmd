@@ -1,0 +1,262 @@
+---
+title: "Vaccine Disparities — Ever vs Recent Vaccination By Demographic"
+author: "Sarah Dias"
+date: "`r format(Sys.Date())`"
+output: pdf_document
+---
+
+# Data & Column Setup
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(tidyr)
+
+# ----- Load the sheet -----
+health5_path <- "health5_cycle09.xlsx"   # update if needed
+sheet_name   <- "US"
+raw <- readxl::read_excel(health5_path, sheet = sheet_name, col_names = FALSE)
+
+# ----- Header anchors -----
+hdr_row <- which(trimws(as.character(raw[[1]])) == "Select characteristics")[1]
+stopifnot(!is.na(hdr_row))
+
+# Scan a small header band to catch multi-row headers
+band_rows <- seq(hdr_row, min(hdr_row + 8, nrow(raw)))
+col_text <- vapply(seq_len(ncol(raw)), function(j) {
+  paste(na.omit(as.character(raw[band_rows, j])), collapse = " ")
+}, character(1))
+
+find_first_col_matching <- function(pattern) {
+  ix <- which(stringr::str_detect(col_text, pattern))
+  if (length(ix)) ix[1] else NA_integer_
+}
+
+# ----- Key columns -----
+# Denominator 'Total' (first 'Total' to the right of col 1)
+total_cols <- which(as.character(raw[hdr_row, ]) == "Total")
+stopifnot(length(total_cols) >= 1)
+col_total <- total_cols[1]
+
+# Yes subcolumns: these three must exist
+col_recent   <- find_first_col_matching(regex("During or after\\s*September,?\\s*2023", TRUE))
+col_before23 <- find_first_col_matching(regex("Before\\s*September,?\\s*2023\\s*but\\s*during\\s*or\\s*after\\s*September,?\\s*2022", TRUE))
+col_before22 <- find_first_col_matching(regex("Before\\s*September,?\\s*2022", TRUE))
+col_yes_dnr  <- find_first_col_matching(regex("did\\s*not\\s*report", TRUE))
+
+# ----- Rows: get_block_until_next_header() using the *given* section titles -----
+get_block_until_next_header <- function(df, header_label) {
+  col1 <- trimws(as.character(df[[1]]))
+  start <- which(col1 == header_label)[1]
+  if (is.na(start)) stop("Couldn't find section: ", header_label)
+  next_headers <- c(
+    "Age","Sex at birth","Gender","Gender identity",
+    "Hispanic origin and Race","Race and Hispanic origin",
+    "Education","Educational attainment","Household income",
+    "Health insurance coverage","Selected characteristics","Select characteristics",
+    "Notes","Source"
+  )
+  i <- start + 1
+  keep <- integer(0)
+  while (i <= nrow(df)) {
+    cell <- col1[i]
+    if (is.na(cell) || str_trim(cell) == "") break
+    if (cell %in% next_headers) break
+    keep <- c(keep, i); i <- i + 1
+  }
+# Return: denominator + 3 required Yes date cols + optional Yes-dnr (if present)
+  cols <- c(1, col_total, col_recent, col_before23, col_before22)
+  if (!is.na(col_yes_dnr)) cols <- c(cols, col_yes_dnr)
+  df[keep, cols, drop = FALSE]
+}
+
+```
+
+# Building Ever vs Recent Vaccination Table
+```{r}
+# ----- Build a tidy compare table for a section -----
+build_vax_compare <- function(section_label, keep_levels = NULL) {
+  blk <- get_block_until_next_header(raw, section_label)
+  nm <- c("group","total_pop18","recent","before23","before22", if (ncol(blk) == 6) "yes_dnr")
+  names(blk) <- nm
+  blk <- blk %>%
+    mutate(
+      group = str_squish(as.character(group)),
+      across(-group, ~ suppressWarnings(as.numeric(.)))
+    ) %>%
+    filter(!is.na(group), group != "", !is.na(total_pop18), total_pop18 > 0)
+  if (!is.null(keep_levels)) {
+    blk <- blk %>% filter(group %in% keep_levels) %>%
+      mutate(group = factor(group, levels = keep_levels))
+  }
+  if (!"yes_dnr" %in% names(blk)) blk$yes_dnr <- 0
+  blk <- blk %>% mutate(ever_total = recent + before23 + before22 + yes_dnr)
+
+  ever   <- blk %>% transmute(group, total_pop18, metric = "Ever vaccinated",   vax_num = ever_total)
+  recent <- blk %>% transmute(group, total_pop18, metric = "Recent vaccinated", vax_num = recent)
+  bind_rows(ever, recent) %>% mutate(pct = vax_num / total_pop18)
+}
+```
+
+# Side by Side Barplot Function
+```{r}
+plot_vax_compare_bars <- function(section_label, keep_levels, title_suffix = section_label, wrap_width = 0) {
+  dat <- build_vax_compare(section_label, keep_levels)
+  if (wrap_width > 0) levels(dat$group) <- stringr::str_wrap(levels(dat$group), wrap_width)
+  ggplot(dat, aes(x = group, y = pct, fill = metric, label = scales::percent(pct, accuracy = 0.1))) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+    geom_text(position = position_dodge(width = 0.75), vjust = -0.25, size = 3.5, show.legend = FALSE) +
+    scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1), expand = expansion(mult = c(0, 0.06))) +
+    scale_fill_manual(values = c("Ever vaccinated"="#1B7F3B", "Recent vaccinated"="#1E90FF"), name = NULL) +
+    labs(
+      title = paste("COVID-19 Vaccination Coverage by", title_suffix),
+      subtitle = "Ever Vaccinated (>= 1 dose) vs Recent Vaccination (last dose/booster during or after Sept. 2023)",
+      x = NULL, y = "Percent of adults"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 12, hjust = 1))
+}
+```
+
+# Education
+```{r, fig.width=7, fig.height=4.6}
+# Education
+edu_levels <- c("Less than high school","High school or GED",
+                "Some college/associate’s degree","Bachelor’s degree or higher")
+plot_vax_compare_bars("Education", edu_levels, "Education")
+```
+
+# Age
+```{r, fig.width=7, fig.height=4.6}
+# Age
+age_levels <- c("18 - 24","25 - 39","40 - 54","55 - 64","65 and above")
+plot_vax_compare_bars("Age", age_levels, "Age")
+```
+
+# Sex at Birth
+```{r, fig.width=7, fig.height=4.6}
+# Sex at birth
+sex_levels <- c("Male","Female")
+plot_vax_compare_bars("Sex at birth", sex_levels, "Sex at birth")
+```
+
+# Gender
+```{r, fig.width=7, fig.height=4.6}
+# Gender
+gender_levels <- c("Cisgender male","Cisgender female","Transgender")
+plot_vax_compare_bars("Gender", gender_levels, "Gender")
+```
+
+# Race/Ethnicity
+```{r, fig.width=7, fig.height=4.6}
+# Race/Ethnicity
+race_levels <- c(
+  "Hispanic or Latino (may be of any race)",
+  "White alone, not Hispanic",
+  "Black alone, not Hispanic",
+  "Asian alone, not Hispanic",
+  "Two or more races + Other races, not Hispanic"
+)
+race_labels <- c(
+  "Hispanic or Latino (may be of any race)" = "Hispanic/Latino",
+  "White alone, not Hispanic"               = "White (NH)",
+  "Black alone, not Hispanic"               = "Black (NH)",
+  "Asian alone, not Hispanic"               = "Asian (NH)",
+  "Two or more races + Other races, not Hispanic" = "Two+ / Other (NH)"
+)
+
+dat <- build_vax_compare("Hispanic origin and Race", race_levels)
+levels(dat$group) <- recode(levels(dat$group), !!!race_labels)
+ggplot(dat, aes(x = group, y = pct, fill = metric, label = scales::percent(pct, accuracy = 0.1))) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  geom_text(position = position_dodge(width = 0.75), vjust = -0.25, size = 3.5, show.legend = FALSE) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1), expand = expansion(mult = c(0, 0.06))) +
+  scale_fill_manual(values = c("Ever vaccinated"="#1B7F3B", "Recent vaccinated"="#1E90FF"), name = NULL) +
+  labs(title = "COVID-19 Vaccination Coverage by Race/Ethnicity",
+       subtitle = "Ever Vaccinated (>= 1 dose) vs Recent Vaccination (last dose/booster during or after Sept. 2023)",
+       x = NULL, y = "Percent of adults") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 12, hjust = 1))
+```
+
+# Household income (binned)
+```{r, fig.width=8, fig.height=4.8}
+# ---- Household income (binned to 6 groups) ----
+# Bins for the x-axis (exact text you want to display)
+bin_order <- c("<25k","25–50k","50–100k","100–150k","150–200k","200k and above")
+
+library(readr)  # for parse_number()
+
+# Pull raw income rows from the sheet
+income_raw <- get_block_until_next_header(raw, "Household income")
+nm <- c("group","total_pop18","recent","before23","before22", if (ncol(income_raw) == 6) "yes_dnr")
+names(income_raw) <- nm
+
+# Lower bound parser + bin mapper
+parse_income_lo <- function(lbl) {
+  l <- tolower(as.character(lbl))
+  if (grepl("^\\s*less\\s+than", l)) return(0)
+  readr::parse_number(l, locale = readr::locale(grouping_mark = ","))  # first number only
+}
+
+bin_from_lo <- function(lo) dplyr::case_when(
+    !is.na(lo) & lo <  25000  ~ "<25k",
+    !is.na(lo) & lo <  50000  ~ "25–50k",
+    !is.na(lo) & lo < 100000  ~ "50–100k",
+    !is.na(lo) & lo < 150000  ~ "100–150k",
+    !is.na(lo) & lo < 200000  ~ "150–200k",
+    !is.na(lo) & lo >= 200000 ~ "200k and above",
+    TRUE ~ NA_character_
+  )
+
+inc <- income_raw %>%
+  dplyr::mutate(
+    dplyr::across(-group, ~ suppressWarnings(as.numeric(.))),
+    group = stringr::str_squish(as.character(group)),
+    lo    = vapply(group, parse_income_lo, numeric(1)),
+    bin   = bin_from_lo(lo),
+    yes_dnr = if (!"yes_dnr" %in% names(.)) 0 else yes_dnr
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(c(recent, before23, before22, yes_dnr),
+                  ~ tidyr::replace_na(., 0)),
+    ever_total = rowSums(cbind(recent, before23, before22, yes_dnr), na.rm = F)
+  ) %>%
+  dplyr::filter(!is.na(bin), !is.na(total_pop18), total_pop18 > 0)
+
+ever <- inc %>%
+  dplyr::group_by(bin) %>%
+  dplyr::summarise(total_pop18 = sum(total_pop18, na.rm = F),
+                   vax_num     = sum(ever_total,  na.rm = F), .groups = "drop") %>%
+  dplyr::mutate(metric = "Ever vaccinated")
+
+recent <- inc %>%
+  dplyr::group_by(bin) %>%
+  dplyr::summarise(total_pop18 = sum(total_pop18, na.rm = F),
+                   vax_num     = sum(recent,      na.rm = F), .groups = "drop") %>%
+  dplyr::mutate(metric = "Recent vaccinated")
+
+dat <- dplyr::bind_rows(ever, recent) %>%
+  dplyr::mutate(pct = vax_num / total_pop18,
+                bin = factor(bin, levels = bin_order))
+
+# Plot (same styling as Race)
+ggplot(dat, aes(x = bin, y = pct, fill = metric,
+                label = scales::percent(pct, accuracy = 0.1))) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  geom_text(position = position_dodge(width = 0.75), vjust = -0.25,
+            size = 3.5, show.legend = FALSE) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1), expand = expansion(mult = c(0, 0.06))) +
+  scale_fill_manual(values = c("Ever vaccinated"="#1B7F3B",
+                               "Recent vaccinated"="#1E90FF"), name = NULL) +
+  labs(title = "COVID-19 Vaccination Coverage by Household income (binned)",
+       subtitle = "Ever Vaccinated (>= 1 dose) vs Recent Vaccination (last dose/booster during or after Sept. 2023)",
+       x = NULL, y = "Percent of adults") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 12, hjust = 1))
+
+
+```
