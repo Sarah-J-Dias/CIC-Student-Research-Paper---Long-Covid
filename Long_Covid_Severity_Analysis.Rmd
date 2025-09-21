@@ -1,0 +1,616 @@
+---
+title: "Research_Analysis"
+output: pdf_document
+date: "2025-08-17"
+---
+
+
+# Libraries and Reading Packages
+```{r}
+# ---- Libraries ----
+# install.packages(c("readxl","dplyr","tidyr","stringr","janitor","ggplot2"))
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(janitor)
+library(ggplot2)
+
+# ---- 0) File path and sheet ----
+# Replace this path with your local file if needed
+excel_path <- "health8_cycle09.xlsx"
+target_sheet <- "US"   # the sheet name in your file
+
+# ---- 1) Read the sheet with no column names (we'll label them) ----
+# We read as text/numeric mix; we'll coerce later.
+raw <- read_excel(excel_path, sheet = target_sheet, col_names = FALSE)
+
+```
+
+
+# Long Covid Severity by Race
+```{r}
+
+# 1) Build race_severity from Health Table 8 -------------------------------
+build_race_severity <- function() {
+  keep_levels <- c(
+    "Hispanic or Latino (may be of any race)",
+    "White alone, not Hispanic",
+    "Black alone, not Hispanic",
+    "Asian alone, not Hispanic",
+    "Two or more races + Other races, not Hispanic"
+  )
+
+  get_block_until_next_header(
+    lc_raw,
+    header_pattern = "^Hispanic origin and Race$|^Race and Hispanic origin$"
+  ) %>%
+    mutate(
+      group          = str_squish(as.character(group)),
+      longcovid_total= suppressWarnings(as.numeric(longcovid_total)),
+      yes_a_lot      = suppressWarnings(as.numeric(yes_a_lot)),
+      yes_a_little   = suppressWarnings(as.numeric(yes_a_little)),
+      not_at_all     = suppressWarnings(as.numeric(not_at_all)),
+      did_not_report = suppressWarnings(as.numeric(did_not_report))
+    ) %>%
+    filter(group %in% keep_levels, !is.na(longcovid_total), longcovid_total > 0) %>%
+    transmute(
+      group,
+      share_a_lot        = yes_a_lot      / longcovid_total,
+      share_a_little     = yes_a_little   / longcovid_total,
+      share_not_at_all   = not_at_all     / longcovid_total,
+      share_missing_lim  = did_not_report / longcovid_total
+    ) %>%
+    mutate(group = factor(group, levels = keep_levels))
+}
+
+race_severity <- build_race_severity()
+
+# 2) Plot function with customizable labels --------------------------------
+plot_race_severity <- function(labels_map = c(
+                                 "Hispanic or Latino (may be of any race)" = "Hispanic",
+                                 "White alone, not Hispanic"               = "White (NH)",
+                                 "Black alone, not Hispanic"               = "Black (NH)",
+                                 "Asian alone, not Hispanic"               = "Asian (NH)",
+                                 "Two or more races + Other races, not Hispanic" = "Multiracial/Other (NH)"
+                               ),
+                               horizontal = FALSE,
+                               wrap_width = 0   # set >0 to wrap long labels
+) {
+  severity_levels <- c("A lot","A little","Not at all","Did not report")
+  severity_colors <- c("A lot"="red","A little"="yellow","Not at all"="green","Did not report"="grey60")
+
+  # ensure order follows labels_map
+  race_df <- race_severity %>%
+    mutate(group = factor(as.character(group), levels = names(labels_map))) %>%
+    arrange(group) %>%
+    # simplified labels
+    mutate(label = recode(as.character(group), !!!labels_map),
+           label = if (wrap_width > 0) stringr::str_wrap(label, width = wrap_width) else label) %>%
+    select(
+      label,
+      `A lot`          = share_a_lot,
+      `A little`       = share_a_little,
+      `Not at all`     = share_not_at_all,
+      `Did not report` = share_missing_lim
+    ) %>%
+    pivot_longer(-label, names_to = "severity", values_to = "share") %>%
+    mutate(severity = factor(severity, levels = severity_levels),
+           label = factor(label, levels = if (horizontal) rev(unique(label)) else unique(label)))
+
+  p <- ggplot(race_df, aes(x = label, y = share, fill = severity)) +
+    geom_col(position = "fill") +
+    scale_y_continuous(labels = scales::percent) +
+    scale_fill_manual(values = severity_colors) +
+    labs(
+      title = "Activity limitation among adults with Long COVID (Cycle 09)",
+      subtitle = "By race/ethnicity; within-group shares (includes 'Did not report')",
+      x = NULL, y = "Percent of Long COVID cases"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(legend.title = element_blank(),
+          axis.text.x = element_text(angle = if (horizontal) 0 else 12, hjust = 1))
+
+  if (horizontal) p <- p + coord_flip()
+  p
+}
+
+# Custom labels (you can change any text here)
+plot_race_severity(labels_map = c(
+  "Hispanic or Latino (may be of any race)" = "Hispanic/Latino",
+  "White alone, not Hispanic"               = "White (NH)",
+  "Black alone, not Hispanic"               = "Black (NH)",
+  "Asian alone, not Hispanic"               = "Asian (NH)",
+  "Two or more races + Other races, not Hispanic" = "Two+ races (NH)"
+))
+
+```
+
+
+# Long Covid Severity by Education
+```{r}
+# Desired order (as printed in Health Table 8)
+educ_levels4 <- c(
+  "Less than high school",
+  "High school or GED",
+  "Some college/associate’s degree",
+  "Bachelor’s degree or higher"
+)
+
+# Optional shorter axis labels (edit if you like)
+educ_labels4 <- c(
+  "Less than high school"                = "Less than HS",
+  "High school or GED"                   = "HS or GED",
+  "Some college/associate’s degree"      = "Some college/AA",
+  "Bachelor’s degree or higher"          = "BA+"
+)
+
+# Pull from Health Table 8 -> compute within-LC shares (includes 'Did not report')
+education_severity4 <- get_block_until_next_header(
+  lc_raw,
+  header_pattern = "^Education$|^Educational attainment$"
+) %>%
+  mutate(
+    group          = stringr::str_squish(as.character(group)),
+    longcovid_total= as.numeric(longcovid_total),
+    yes_a_lot      = as.numeric(yes_a_lot),
+    yes_a_little   = as.numeric(yes_a_little),
+    not_at_all     = as.numeric(not_at_all),
+    did_not_report = as.numeric(did_not_report)
+  ) %>%
+  filter(group %in% educ_levels4, longcovid_total > 0) %>%
+  transmute(
+    group = factor(group, levels = educ_levels4),
+    `A lot`          = yes_a_lot      / longcovid_total,
+    `A little`       = yes_a_little   / longcovid_total,
+    `Not at all`     = not_at_all     / longcovid_total,
+    `Did not report` = did_not_report / longcovid_total
+  )
+
+# Long → wide for plotting
+severity_levels <- c("A lot","A little","Not at all","Did not report")
+severity_colors <- c("A lot"="red","A little"="yellow","Not at all"="green","Did not report"="grey60")
+
+edu_plot_df4 <- education_severity4 %>%
+  tidyr::pivot_longer(-group, names_to = "severity", values_to = "share") %>%
+  mutate(severity = factor(severity, levels = severity_levels))
+
+# ---- Plot: 4 education columns ----
+p_edu4 <- ggplot(edu_plot_df4, aes(x = group, y = share, fill = severity)) +
+  geom_col(position = "fill") +
+  scale_x_discrete(labels = educ_labels4) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = severity_colors) +
+  labs(
+    title    = "Long COVID severity by education (Cycle 09)",
+    subtitle = "Includes nonresponse as 'Did not report' (shares within current Long COVID cases)",
+    x = NULL,
+    y = "Percent of Long COVID cases"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank())
+
+p_edu4
+
+
+```
+
+# Long Covid Severity for Income Levels
+```{r}
+
+# ---- 0) Read Health Table 8 (NOT Health 5) ----
+lc_raw <- read_excel("health8_cycle09.xlsx", sheet = "US", col_names = FALSE)
+
+# ---- 1) Helper to slice a section block ----
+get_block_until_next_header <- function(df, header_pattern,
+                                        next_header_patterns = c(
+                                          "^Age$",
+                                          "^Sex at birth$",
+                                          "^Gender identity$|^Gender$",
+                                          "^Hispanic origin and Race$|^Race and Hispanic origin$",
+                                          "^Education$|^Educational attainment$",
+                                          "^Household income$",
+                                          "^Health insurance coverage$",
+                                          "^Selected characteristics$|^Select characteristics$|^Notes$|^Source$"
+                                        )) {
+  start_idx <- which(str_detect(trimws(df[[1]]),
+                                regex(header_pattern, ignore_case = TRUE)))[1]
+  if (is.na(start_idx)) stop("Section header not found: ", header_pattern)
+
+  # collect rows until next header or blank
+  i <- start_idx + 1; keep <- integer(0)
+  while (i <= nrow(df)) {
+    cell <- df[[1]][i]
+    if (is.na(cell) || str_trim(as.character(cell)) == "") break
+    if (any(str_detect(as.character(cell),
+                       regex(paste(next_header_patterns, collapse="|"), ignore_case = TRUE)))) break
+    keep <- c(keep, i); i <- i + 1
+  }
+
+  block <- df[keep, 1:8, drop = FALSE]
+  names(block) <- c("group","ever_covid_total","longcovid_total",
+                    "yes_a_lot","yes_a_little","not_at_all","did_not_report","no_longcovid")
+  block
+}
+
+# ---- 2) Extract the household income block and coerce numbers ----
+income_block <- get_block_until_next_header(lc_raw, "^Household income$") %>%
+  mutate(
+    group            = str_squish(as.character(group)),
+    across(-group, ~ suppressWarnings(as.numeric(.x)))
+  )
+
+# ---- 3) Robust binning of Household income into 6 bins ----
+parse_lower_bound <- function(lbl) {
+  s <- tolower(lbl)
+  nums <- str_extract_all(s, "\\d{1,3}(?:,\\d{3})*")[[1]]
+  nums <- as.numeric(gsub(",", "", nums))
+  if (length(nums) == 0) return(NA_real_)
+  if (str_detect(s, "less\\s*than")) return(0)
+  nums[1]
+}
+
+income_block <- income_block %>%
+  mutate(lo = vapply(group, parse_lower_bound, numeric(1)),
+         bin = case_when(
+           !is.na(lo) & lo <  25000  ~ "<25k",
+           !is.na(lo) & lo <  50000  ~ "25–50k",
+           !is.na(lo) & lo < 100000  ~ "50–100k",
+           !is.na(lo) & lo < 150000  ~ "100–150k",
+           !is.na(lo) & lo < 200000  ~ "150–200k",
+           !is.na(lo) & lo >= 200000 ~ "200k and above",
+           TRUE ~ NA_character_
+         ))
+
+bin_levels <- c("<25k","25–50k","50–100k","100–150k","150–200k","200k and above")
+
+# ---- 4) Collapse to bins and compute within-group shares ----
+needed <- c("ever_covid_total","longcovid_total","yes_a_lot","yes_a_little","not_at_all","did_not_report")
+
+inc6_counts <- income_block %>%
+  filter(!is.na(bin)) %>%
+  group_by(bin) %>%
+  summarise(across(all_of(needed), ~ sum(.x, na.rm = TRUE)), .groups = "drop") %>%
+  rename(group = bin) %>%
+  mutate(group = factor(group, levels = bin_levels)) %>%
+  arrange(group) %>%
+  tidyr::complete(group = factor(bin_levels, levels = bin_levels),
+                  fill = setNames(as.list(rep(0, length(needed))), needed))
+
+inc6_severity <- inc6_counts %>%
+  mutate(
+    share_a_lot       = ifelse(longcovid_total > 0, yes_a_lot      / longcovid_total, NA_real_),
+    share_a_little    = ifelse(longcovid_total > 0, yes_a_little   / longcovid_total, NA_real_),
+    share_not_at_all  = ifelse(longcovid_total > 0, not_at_all     / longcovid_total, NA_real_),
+    share_missing_lim = ifelse(longcovid_total > 0, did_not_report / longcovid_total, NA_real_)
+  )
+
+# ---- 5) Plot (stacked 100% bars) ----
+severity_levels <- c("A lot", "A little", "Not at all", "Did not report")
+severity_colors <- c("A lot"="red", "A little"="yellow", "Not at all"="green", "Did not report"="grey60")
+
+income_plot_df <- inc6_severity %>%
+  select(group,
+         `A lot`          = share_a_lot,
+         `A little`       = share_a_little,
+         `Not at all`     = share_not_at_all,
+         `Did not report` = share_missing_lim) %>%
+  pivot_longer(-group, names_to = "severity", values_to = "share") %>%
+  mutate(severity = factor(severity, levels = severity_levels))
+
+ggplot(income_plot_df, aes(x = group, y = share, fill = severity)) +
+  geom_col(position = "fill") +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = severity_colors) +
+  labs(title = "Activity limitation among adults with Long COVID (Cycle 09)",
+       subtitle = "By household income; within-group shares (includes 'Did not report')",
+       x = NULL, y = "Percent of Long COVID cases") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank())
+
+
+```
+
+# Long Covid Severity for Age
+```{r}
+
+if (!exists("lc_raw")) {
+  lc_raw <- read_excel("health8_cycle09.xlsx", sheet = "US", col_names = FALSE)
+}
+
+# Slice rows starting at a section header until the next header/blank
+get_block_until_next_header <- function(df, header_pattern,
+                                        next_header_patterns = c(
+                                          "^Age$",
+                                          "^Sex at birth$",
+                                          "^Gender identity$|^Gender$",
+                                          "^Hispanic origin and Race$|^Race and Hispanic origin$",
+                                          "^Education$|^Educational attainment$",
+                                          "^Household income$",
+                                          "^Health insurance coverage$",
+                                          "^Selected characteristics$|^Select characteristics$|^Notes$|^Source$"
+                                        )) {
+  start_idx <- which(str_detect(trimws(df[[1]]),
+                                regex(header_pattern, ignore_case = TRUE)))
+  if (!length(start_idx)) stop("Couldn't find section header: ", header_pattern)
+  start_idx <- start_idx[1]
+
+  i <- start_idx + 1
+  keep <- integer(0)
+  while (i <= nrow(df)) {
+    cell <- df[[1]][i]
+    if (is.na(cell) || str_trim(as.character(cell)) == "") break
+    if (any(str_detect(as.character(cell),
+                       regex(paste(next_header_patterns, collapse="|"), ignore_case = TRUE)))) break
+    keep <- c(keep, i)
+    i <- i + 1
+  }
+
+  # Health Table 8 first 8 columns:
+  # group | ever_covid_total | longcovid_total | A lot | A little | Not at all | Did not report | No Long COVID
+  block <- df[keep, 1:8, drop = FALSE]
+  names(block) <- c("group","ever_covid_total","longcovid_total",
+                    "yes_a_lot","yes_a_little","not_at_all","did_not_report","no_longcovid")
+
+  block %>%
+    mutate(
+      group            = str_squish(as.character(group)),
+      ever_covid_total = suppressWarnings(as.numeric(ever_covid_total)),
+      longcovid_total  = suppressWarnings(as.numeric(longcovid_total)),
+      yes_a_lot        = suppressWarnings(as.numeric(yes_a_lot)),
+      yes_a_little     = suppressWarnings(as.numeric(yes_a_little)),
+      not_at_all       = suppressWarnings(as.numeric(not_at_all)),
+      did_not_report   = suppressWarnings(as.numeric(did_not_report))
+    ) %>%
+    filter(!is.na(group), group != "", !is.na(longcovid_total), longcovid_total > 0)
+}
+
+# --- Build age_severity -------------------------------------------------------
+age_order <- c("18 - 24","25 - 39","40 - 54","55 - 64","65 and above")
+
+age_severity <- get_block_until_next_header(lc_raw, header_pattern = "^Age$") %>%
+  filter(group %in% age_order) %>%
+  transmute(
+    group,
+    share_a_lot       = yes_a_lot      / longcovid_total,
+    share_a_little    = yes_a_little   / longcovid_total,
+    share_not_at_all  = not_at_all     / longcovid_total,
+    share_missing_lim = did_not_report / longcovid_total
+  )
+
+# --- Plot (same style as your others) ----------------------------------------
+severity_levels <- c("A lot", "A little", "Not at all", "Did not report")
+severity_colors <- c("A lot"="red", "A little"="yellow", "Not at all"="green", "Did not report"="grey60")
+
+age_plot_df <- age_severity %>%
+  mutate(group = factor(group, levels = age_order)) %>%
+  arrange(group) %>%
+  select(group,
+         `A lot`          = share_a_lot,
+         `A little`       = share_a_little,
+         `Not at all`     = share_not_at_all,
+         `Did not report` = share_missing_lim) %>%
+  pivot_longer(-group, names_to = "severity", values_to = "share") %>%
+  mutate(severity = factor(severity, levels = severity_levels))
+
+ggplot(age_plot_df, aes(x = group, y = share, fill = severity)) +
+  geom_col(position = "fill") +
+  scale_x_discrete(limits = age_order) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = severity_colors) +
+  labs(
+    title = "Activity limitation among adults with Long COVID (Cycle 09)",
+    subtitle = "By age; within-group shares (includes 'Did not report')",
+    x = NULL, y = "Percent of Long COVID cases"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank(),
+        axis.text.x = element_text(angle = 12, hjust = 1))
+# + coord_flip()  # <- uncomment for horizontal bars
+
+
+```
+
+# Long Covid Severity for Sex
+```{r}
+# 1) Extract the *Sex at birth* block (avoid matching "Sexual orientation")
+sex_block <- get_block_until_next_header(
+  raw,
+  header_pattern = "^(Sex\\s*(at|assigned\\s+at)\\s*birth)\\b",  # strict: avoids "Sexual"
+  next_header_patterns = c("Hispanic origin and Race|Race",
+                           "Education|Educational",
+                           "Household income",
+                           "Health insurance",
+                           "^Age\\b|^Sex at birth\\b|^Sexual orientation\\b|^Gender identity\\b",
+                           "^Notes|^Source|^Selected characteristics")
+)
+
+# 2) Clean the block & keep only Female/Male
+sex_block <- sex_block %>%
+  mutate(group = str_squish(as.character(group))) %>%
+  # drop totals/blank rows if present
+  filter(!is.na(group), group != "",
+         !str_detect(group, regex("^total$|^selected characteristics$|^notes?$|^source$", TRUE))) %>%
+  # keep just the two sex-at-birth categories
+  filter(group %in% c("Female", "Male")) %>%
+  # coerce counts
+  mutate(across(c(yes_a_lot, yes_a_little, not_at_all, did_not_report),
+                ~ suppressWarnings(as.numeric(.x))),
+         longcovid_total = suppressWarnings(as.numeric(longcovid_total))) %>%
+  # if did_not_report is blank, back it out so parts sum to total
+  mutate(did_not_report = if_else(
+    is.na(did_not_report),
+    pmax(longcovid_total - (yes_a_lot + yes_a_little + not_at_all), 0),
+    did_not_report
+  )) %>%
+  # require a valid denominator
+  filter(!is.na(longcovid_total), longcovid_total > 0)
+
+# (Optional) sanity check
+# print(sex_block$group)
+
+# 3) Shares within Long-COVID cases
+sex_severity <- sex_block %>%
+  mutate(
+    share_a_lot       = yes_a_lot      / longcovid_total,
+    share_a_little    = yes_a_little   / longcovid_total,
+    share_not_at_all  = not_at_all     / longcovid_total,
+    share_missing_lim = did_not_report / longcovid_total
+  ) %>%
+  mutate(group = factor(group, levels = c("Female", "Male")))
+
+# 4) Plot (red/yellow/green + grey; no numbers)
+severity_levels <- c("A lot", "A little", "Not at all", "Did not report")
+severity_colors <- c("A lot"="red", "A little"="yellow", "Not at all"="green", "Did not report"="grey60")
+
+sex_plot_df <- sex_severity %>%
+  select(group,
+         `A lot`          = share_a_lot,
+         `A little`       = share_a_little,
+         `Not at all`     = share_not_at_all,
+         `Did not report` = share_missing_lim) %>%
+  pivot_longer(-group, names_to = "severity", values_to = "share") %>%
+  mutate(severity = factor(severity, levels = severity_levels))
+
+ggplot(sex_plot_df, aes(x = group, y = share, fill = severity)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = severity_colors) +
+  labs(title = "Activity limitation among adults with Long COVID (Cycle 09)",
+       subtitle = "By sex at birth; within-group shares (includes 'Did not report')",
+       x = NULL, y = "Percent of Long COVID cases") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank())
+```
+
+# Long Covid Severity by Gender
+```{r}
+
+# ---- 2) Helper: grab a section until the next header ------------------------
+get_block_until_next_header <- function(df, header_pattern,
+                                        next_header_patterns = c(
+                                          "^Age\\b",
+                                          "^Sex at birth\\b",
+                                          "^Sexual orientation\\b",
+                                          "Hispanic origin and Race|Race",
+                                          "Education|Educational",
+                                          "Household income",
+                                          "Health insurance",
+                                          "^Selected characteristics|^Notes|^Source"
+                                        )) {
+  # find header row in column 1
+  start_idx <- which(str_detect(trimws(df[[1]]), regex(header_pattern, ignore_case = TRUE)))
+  if (length(start_idx) == 0) stop("Could not find header: ", header_pattern)
+  start_idx <- start_idx[1]
+
+  # collect rows after header until blank or next header
+  i <- start_idx + 1
+  keep <- integer(0)
+  while (i <= nrow(df)) {
+    cell <- df[[1]][i]
+    if (is.na(cell) || str_trim(cell) == "") break
+    if (any(str_detect(cell, regex(paste(next_header_patterns, collapse="|"), ignore_case = TRUE)))) break
+    keep <- c(keep, i)
+    i <- i + 1
+  }
+
+  block <- df[keep, 1:8, drop = FALSE]
+  names(block) <- c("group",
+                    "ever_covid_total",
+                    "longcovid_total",
+                    "yes_a_lot",
+                    "yes_a_little",
+                    "not_at_all",
+                    "did_not_report",
+                    "no_longcovid")
+  block
+}
+
+# ---- 3) Extract the Gender identity block ----------------------------------
+gi_raw <- get_block_until_next_header(raw, header_pattern = "^(Gender identity|Gender)\\b")
+
+# ---- 4) Map to Cis male / Cis female / Transgender --------------------------
+gi_map <- gi_raw %>%
+  mutate(
+    group_raw = str_squish(as.character(group)),
+    gl        = str_to_lower(group_raw),
+    group3 = case_when(
+      str_detect(gl, "(^|\\b)(cisgender|cis)(\\b|[^a-z]).*\\b(male|man)\\b")      ~ "Cisgender male",
+      str_detect(gl, "(^|\\b)(cisgender|cis)(\\b|[^a-z]).*\\b(female|woman)\\b")  ~ "Cisgender female",
+      str_detect(gl, "\\btrans(gender)?\\b")                                      ~ "Transgender",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(group3)) %>%   # drop "None of these", "Prefer not to answer", etc.
+  # robust numeric parsing (commas, dashes)
+  mutate(
+    ever_covid_total = parse_number(ever_covid_total),
+    longcovid_total  = parse_number(longcovid_total),
+    yes_a_lot        = parse_number(yes_a_lot),
+    yes_a_little     = parse_number(yes_a_little),
+    not_at_all       = parse_number(not_at_all),
+    did_not_report   = parse_number(did_not_report)
+  ) %>%
+  # back-fill totals if blank; back-calc nonresponse if blank
+  mutate(
+    parts_sum        = rowSums(across(c(yes_a_lot, yes_a_little, not_at_all, did_not_report)), na.rm = TRUE),
+    longcovid_total  = coalesce(longcovid_total, if_else(parts_sum > 0, parts_sum, NA_real_)),
+    did_not_report   = coalesce(did_not_report, pmax(longcovid_total - (yes_a_lot + yes_a_little + not_at_all), 0))
+  )
+
+# ---- 5) Collapse to exactly three rows & diagnose ---------------------------
+gi_counts <- gi_map %>%
+  group_by(group3) %>%
+  summarise(
+    ever_covid_total = sum(ever_covid_total, na.rm = TRUE),
+    longcovid_total  = sum(longcovid_total,  na.rm = TRUE),
+    yes_a_lot        = sum(yes_a_lot,        na.rm = TRUE),
+    yes_a_little     = sum(yes_a_little,     na.rm = TRUE),
+    not_at_all       = sum(not_at_all,       na.rm = TRUE),
+    did_not_report   = sum(did_not_report,   na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(gi_counts %>% select(group3, longcovid_total))  # quick check
+missing <- setdiff(c("Cisgender male","Cisgender female","Transgender"), gi_counts$group3)
+if (length(missing)) message("Missing groups: ", paste(missing, collapse = ", "),
+                             ". Raw labels were: ", paste(unique(gi_raw[[1]]), collapse = " | "))
+
+# ---- 6) Shares within Long-COVID cases -------------------------------------
+gender_severity <- gi_counts %>%
+  filter(!is.na(longcovid_total), longcovid_total > 0) %>%
+  mutate(
+    share_a_lot       = yes_a_lot      / longcovid_total,
+    share_a_little    = yes_a_little   / longcovid_total,
+    share_not_at_all  = not_at_all     / longcovid_total,
+    share_missing_lim = did_not_report / longcovid_total
+  ) %>%
+  mutate(group3 = factor(group3, levels = c("Cisgender male","Cisgender female","Transgender"))) %>%
+  arrange(group3)
+
+# ---- 7) Plot (no numbers on bars) -------------------------------------------
+severity_levels <- c("A lot","A little","Not at all","Did not report")
+severity_colors <- c("A lot"="red","A little"="yellow","Not at all"="green","Did not report"="grey60")
+
+gender_plot_df <- gender_severity %>%
+  select(group = group3,
+         `A lot` = share_a_lot,
+         `A little` = share_a_little,
+         `Not at all` = share_not_at_all,
+         `Did not report` = share_missing_lim) %>%
+  pivot_longer(-group, names_to = "severity", values_to = "share") %>%
+  mutate(severity = factor(severity, levels = severity_levels))
+
+ggplot(gender_plot_df, aes(x = group, y = share, fill = severity)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = severity_colors) +
+  labs(title = "Activity limitation among adults with Long COVID (Cycle 09)",
+       subtitle = "By gender identity; within-group shares (includes 'Did not report')",
+       x = NULL, y = "Percent of Long COVID cases") +
+  theme_minimal(base_size = 12) +
+  theme(legend.title = element_blank())
+
+```
+
