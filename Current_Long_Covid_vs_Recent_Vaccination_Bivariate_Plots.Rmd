@@ -1,0 +1,522 @@
+---
+title: "Current Long COVID vs Recent Vaccination — Bivariate Plots"
+author: "Sarah Dias"
+date: "2025-09-20"
+output: pdf_document
+---
+
+# Packages and Inputs
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+# ---- File paths (edit if needed) ----
+health5_path <- "health5_cycle09.xlsx"  # Table 5
+health8_path <- "health8_cycle09.xlsx"  # Table 8
+sheet_name   <- "US"
+
+# Read once
+t5_raw <- read_excel(health5_path, sheet = sheet_name, col_names = FALSE)
+t8_raw <- read_excel(health8_path, sheet = sheet_name, col_names = FALSE)
+
+```
+
+# Header and Block Utilities
+```{r}
+find_hdr_row <- function(df) {
+  which(trimws(as.character(df[[1]])) %in% c("Select characteristics","Selected characteristics"))[1]
+}
+
+# Scan down from a section header in col 1 and stop at the next section/blank
+get_block_until_next_header <- function(df, section_label) {
+  col1 <- trimws(as.character(df[[1]]))
+  start <- which(col1 == section_label)[1]
+  if (is.na(start)) stop("Section not found: ", section_label)
+
+  next_titles <- c(
+    "Age","Sex at birth","Gender","Gender identity",
+    "Hispanic origin and Race","Race and Hispanic origin",
+    "Education","Educational attainment","Household income",
+    "Health insurance coverage","Selected characteristics","Select characteristics",
+    "Notes","Source"
+  )
+
+  i <- start + 1
+  keep <- integer(0)
+  while (i <= nrow(df)) {
+    v <- col1[i]
+    if (is.na(v) || str_trim(v) == "") break
+    if (v %in% next_titles) break
+    keep <- c(keep, i); i <- i + 1
+  }
+  df[keep, , drop = FALSE]
+}
+
+numify <- function(x) {
+  x2 <- gsub("[^0-9\\.-]", "", as.character(x))
+  suppressWarnings(as.numeric(x2))
+}
+
+```
+
+# Header Matchers
+```{r}
+# ------------------------------
+# Normalizer reused by both
+# ------------------------------
+.norm <- function(x) {
+  x <- tolower(paste(na.omit(as.character(x)), collapse = " "))
+  x <- gsub("[\u2018\u2019\u201A\u201B\u2032]", "'", x)
+  x <- gsub("[\u201C\u201D\u201E\u2033]", "\"", x)
+  x <- gsub("[\u2013\u2014\u2212]", "-", x)
+  x <- gsub("[\r\n\t]+", " ", x)
+  x <- gsub("[^a-z0-9]+", " ", x)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+# helper: does the normalized, collapsed header for column j CONTAIN token t?
+.has_tok <- function(col_norm, t) {
+  grepl(paste0("\\b", t, "\\b"), col_norm, perl = TRUE)
+}
+
+# ------------------------------------
+# Table 5 finder (group total + recent)
+# ------------------------------------
+t5_find_columns <- function(df, header_rows_after = 8, debug = FALSE) {
+  hr <- find_hdr_row(df); stopifnot(!is.na(hr))
+  band <- seq(hr, min(hr + header_rows_after, nrow(df)))
+  band_raw  <- lapply(seq_len(ncol(df)), function(j) trimws(as.character(df[band, j])))
+  band_norm <- vapply(band_raw, .norm, character(1))
+
+  # group Total is the 2nd column (immediately after "Select characteristics")
+  col_total_group <- 2L
+
+  cand_recent <- which(vapply(
+    seq_along(band_norm),
+    function(j) .has_tok(band_norm[j], "during or after september 2023"),
+    logical(1)
+  ))
+
+  if (!length(cand_recent)) {
+    if (isTRUE(debug)) {
+      message("Table 5 preview:"); print(as.data.frame(t(band_raw)))
+      message("Normalized:");     print(band_norm)
+    }
+    stop("Table 5 header band is missing 'During or after September, 2023'.")
+  }
+
+  list(
+    col_total_group = col_total_group,
+    col_recent      = cand_recent[1]
+  )
+}
+
+# ------------------------------------
+# Table 8 finder (current LC 'Total')
+# ------------------------------------
+t8_find_columns <- function(df, header_rows_after = 8, debug = FALSE) {
+  hr <- find_hdr_row(df); stopifnot(!is.na(hr))
+  band <- seq(hr, min(hr + header_rows_after, nrow(df)))
+  band_raw  <- lapply(seq_len(ncol(df)), function(j) trimws(as.character(df[band, j])))
+  band_norm <- vapply(band_raw, .norm, character(1))
+
+  yes_cols <- which(vapply(seq_along(band_norm),
+                           function(j) .has_tok(band_norm[j], "yes"),
+                           logical(1)))
+  if (!length(yes_cols)) {
+    if (isTRUE(debug)) {
+      message("No 'Yes' found. Header band preview:"); print(as.data.frame(t(band_raw)))
+      message("Normalized:"); print(band_norm)
+    }
+    stop("Could not find 'Yes' column in the header band of Table 8.")
+  }
+  yes_left <- min(yes_cols)
+
+  # Find the first 'Total' at or to the right of the YES block
+  tot_cols <- which(vapply(seq_along(band_norm),
+                           function(j) .has_tok(band_norm[j], "total"),
+                           logical(1)))
+  tot_cols <- tot_cols[tot_cols >= yes_left]
+
+  if (!length(tot_cols)) {
+    if (isTRUE(debug)) {
+      message("Found 'Yes' but no 'Total' to the right. Preview:")
+      print(as.data.frame(t(band_raw))); message("Normalized:"); print(band_norm)
+    }
+    stop("Could not locate current Long COVID 'Total' in Table 8.")
+  }
+
+  list(
+    col_group    = 1L,
+    col_lc_total = tot_cols[1]
+  )
+}
+
+t5_cols <- t5_find_columns(t5_raw, debug = TRUE)
+t8_cols <- t8_find_columns(t8_raw, debug = TRUE)
+
+```
+
+
+# Builders
+```{r}
+# numeric helper (unchanged)
+numify <- function(x) suppressWarnings(as.numeric(gsub("[^0-9.-]", "", as.character(x))))
+
+# rows for a labeled section (unchanged)
+get_block_until_next_header <- function(df, section_label) {
+  col1 <- trimws(as.character(df[[1]]))
+  start <- which(col1 == section_label)[1]; stopifnot(!is.na(start))
+  next_titles <- c("Age","Sex at birth","Gender","Gender identity",
+                   "Hispanic origin and Race","Race and Hispanic origin",
+                   "Education","Educational attainment","Household income",
+                   "Health insurance coverage","Selected characteristics","Select characteristics",
+                   "Notes","Source")
+  i <- start + 1; keep <- integer(0)
+  while (i <= nrow(df)) {
+    v <- col1[i]
+    if (is.na(v) || stringr::str_trim(v) == "" || v %in% next_titles) break
+    keep <- c(keep, i); i <- i + 1
+  }
+  df[keep, , drop = FALSE]
+}
+
+# resolve columns once (unchanged)
+t5_cols <- t5_find_columns(t5_raw)
+t8_cols <- t8_find_columns(t8_raw)
+
+# ---- Table 5: group totals (denominator = overall group total, col 2)
+build_t5_group_totals <- function(section_label, keep_levels = NULL) {
+  b   <- get_block_until_next_header(t5_raw, section_label)
+  out <- b[, c(1, t5_cols$col_total_group), drop = FALSE]
+  names(out) <- c("group", "total_t5")
+
+  out <- out |>
+    dplyr::mutate(group = stringr::str_squish(as.character(group)),
+                  total_t5 = numify(total_t5)) |>
+    dplyr::filter(!is.na(group), group != "", !is.na(total_t5), total_t5 > 0)
+
+  if (!is.null(keep_levels)) {
+    out <- out |>
+      dplyr::filter(group %in% keep_levels) |>
+      dplyr::mutate(group = factor(group, levels = keep_levels))
+  }
+  out
+}
+
+# ---- X-axis: recent vaccinated / group total
+build_recent_rate_by_group <- function(section_label, keep_levels = NULL) {
+  b <- get_block_until_next_header(t5_raw, section_label)
+  b <- b[, c(1, t5_cols$col_total_group, t5_cols$col_recent), drop = FALSE]
+  names(b) <- c("group", "total_t5", "recent")
+
+  out <- b |>
+    dplyr::mutate(group = stringr::str_squish(as.character(group)),
+                  total_t5 = numify(total_t5),
+                  recent   = numify(recent)) |>
+    dplyr::filter(!is.na(group), group != "", total_t5 > 0)
+
+  if (!is.null(keep_levels)) {
+    out <- out |>
+      dplyr::filter(group %in% keep_levels) |>
+      dplyr::mutate(group = factor(group, levels = keep_levels))
+  }
+
+  out |>
+    dplyr::transmute(group, recent_pct = recent / total_t5)
+}
+
+```
+
+# Y-axis
+```{r}
+# Y = current Long COVID (Table 8) / Table-5 group total
+build_lc_current_rate_by_group_t5denom <- function(section_label, keep_levels = NULL) {
+  # rows for this section from Table 8
+  b8 <- get_block_until_next_header(t8_raw, section_label)
+  b8 <- b8[, c(1, t8_cols$col_lc_total), drop = FALSE]
+  names(b8) <- c("group", "lc_current")
+
+  # clean + (optionally) restrict to keep_levels
+  num <- b8 |>
+    dplyr::mutate(
+      group      = stringr::str_squish(as.character(group)),
+      lc_current = numify(lc_current)
+    ) |>
+    dplyr::filter(!is.na(group), group != "", !is.na(lc_current))
+
+  if (!is.null(keep_levels)) {
+    num <- num |>
+      dplyr::filter(group %in% keep_levels) |>
+      dplyr::mutate(group = factor(group, levels = keep_levels))
+  }
+
+  # denominator from Table 5 (overall group totals)
+  den <- build_t5_group_totals(section_label, keep_levels)
+
+  dplyr::left_join(num, den, by = "group") |>
+    dplyr::mutate(lc_pct = lc_current / pmax(total_t5, 1)) |>
+    dplyr::select(group, lc_pct)
+}
+
+
+```
+
+
+# Bivariate Plot Helper
+```{r}
+plot_bivariate_lc_vs_vax <- function(
+  section_label,
+  keep_levels,
+  title_suffix  = section_label,
+  group_colors  = NULL,   # e.g., c("Female"="#ff6da8","Male"="#2f7ed8")
+  show_labels   = FALSE,
+  point_size    = 3.8,
+  wrap_width    = 0
+) {
+  xdat <- build_recent_rate_by_group(section_label, keep_levels)
+  ydat <- build_lc_current_rate_by_group_t5denom(section_label, keep_levels)
+  dat  <- dplyr::inner_join(xdat, ydat, by = "group")
+
+  dat$group <- factor(as.character(dat$group), levels = keep_levels)
+  disp <- as.character(dat$group); if (wrap_width > 0) disp <- stringr::str_wrap(disp, wrap_width)
+  dat$display <- factor(disp, levels = unique(disp))
+
+  if (is.null(group_colors)) {
+    base_pal <- c("#FF6B6B","#B6C400","#2ECC71","#2F7ED8","#C266FF","magenta")
+    group_colors <- stats::setNames(base_pal[seq_len(nlevels(dat$display))], levels(dat$display))
+  }
+
+  p <- ggplot2::ggplot(dat, ggplot2::aes(x = recent_pct, y = lc_pct, color = display)) +
+    ggplot2::geom_point(size = point_size) +
+    ggplot2::scale_color_manual(values = group_colors,
+                                guide = ggplot2::guide_legend(override.aes = list(size = 4))) +
+    ggplot2::scale_x_continuous(
+      "% vaccinated during/after Sep 2023 (Table 5 group total)",
+      limits = c(0, 1),
+      labels = scales::percent_format()
+    ) +
+    ggplot2::scale_y_continuous(
+      "% with Long COVID (current) among group (Table 5 group total)",
+      limits = c(0, 1),
+      labels = scales::percent_format()
+    ) +
+    ggplot2::labs(
+      title    = paste("Long COVID vs Recent Vaccination —", title_suffix),
+      subtitle = "Both axes use Table 5 'Total' per demographic group",
+      color    = NULL
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(legend.position = "right",
+                   axis.text.x = ggplot2::element_text(hjust = 1))
+
+  if (isTRUE(show_labels)) {
+    p <- p + ggplot2::geom_text(
+      ggplot2::aes(label = scales::percent(lc_pct, accuracy = 0.1)),
+      vjust = -0.7, size = 3, show.legend = FALSE
+    )
+  }
+  p
+}
+
+```
+
+```{r}
+# --- Sex at birth ---
+plot_bivariate_lc_vs_vax(
+  section_label = "Sex at birth",
+  keep_levels   = c("Female", "Male"),
+  title_suffix  = "Sex at birth",
+  group_colors  = c("Female" = "#ff6da8", "Male" = "#2f7ed8"),
+  show_labels   = FALSE
+)
+
+```
+# Plotting Age
+```{r}
+# --- Age ---
+plot_bivariate_lc_vs_vax(
+  section_label = "Age",
+  keep_levels   = c("18 - 24","25 - 39","40 - 54","55 - 64","65 and above"),
+  title_suffix  = "Age",
+  group_colors  = c(
+    "18 - 24"     = "#FF6B6B",
+    "25 - 39"     = "#B6C400",
+    "40 - 54"     = "#2ECC71",
+    "55 - 64"     = "#2F7ED8",
+    "65 and above"= "#C266FF"
+  )
+)
+```
+# Plotting 
+```{r}
+# --- Race / Ethnicity ---
+# If your sheet uses "Race and Hispanic origin", just change section_label accordingly.
+plot_bivariate_lc_vs_vax(
+  section_label = "Hispanic origin and Race",
+  keep_levels   = c(
+    "Hispanic or Latino (may be of any race)",
+    "White alone, not Hispanic",
+    "Black alone, not Hispanic",
+    "Asian alone, not Hispanic",
+    "Two or more races + Other races, not Hispanic"
+  ),
+  title_suffix  = "Race/Ethnicity",
+  wrap_width    = 18
+)
+
+```
+
+# Education
+```{r}
+# --- Educational attainment ---
+plot_bivariate_lc_vs_vax(
+  section_label = "Education",
+  keep_levels   = c(
+    "Less than high school",
+    "High school or GED",
+    "Some college/associate’s degree",
+    "Bachelor’s degree or higher"
+  ),
+  title_suffix  = "Education",
+  wrap_width    = 20
+)
+
+```
+
+# Gender
+```{r}
+plot_bivariate_lc_vs_vax(
+  section_label = "Gender",
+  keep_levels   = c("Cisgender female",
+                    "Cisgender male",
+                    "Transgender"),
+  title_suffix  = "Gender",
+  group_colors  = c(
+    "Cisgender female" = "#ff6da8",
+    "Cisgender male"   = "#2f7ed8",
+    "Transgender" = "#8a2be2"
+  ),
+  show_labels = FALSE
+)
+
+```
+
+# 
+```{r}
+# ---- Income bivariate plot (all-in-one) --------------------------------------
+
+# Vectorized lower-bound parser for income labels
+parse_income_lo <- function(lbl) {
+  l   <- tolower(as.character(lbl))
+  out <- readr::parse_number(l, locale = readr::locale(grouping_mark = ","))
+
+  # handle "Less than $25,000"
+  out[grepl("^\\s*less\\s+than", l)] <- 0
+
+  # treat non-bins (e.g., "Did not report") as NA
+  out[grepl("did\\s+not\\s+report|prefer\\s+not|don't\\s+know", l)] <- NA_real_
+
+  out
+}
+
+bin_from_lo <- function(lo) dplyr::case_when(
+  !is.na(lo) & lo <  25000  ~ "<25k",
+  !is.na(lo) & lo <  50000  ~ "25–50k",
+  !is.na(lo) & lo < 100000  ~ "50–100k",
+  !is.na(lo) & lo < 150000  ~ "100–150k",
+  !is.na(lo) & lo < 200000  ~ "150–200k",
+  !is.na(lo) & lo >= 200000 ~ "200k and above",
+  TRUE ~ NA_character_
+)
+income_bins <- c("<25k","25–50k","50–100k","100–150k","150–200k","200k and above")
+
+# X: recent vaccinated / Table 5 group total (binned)
+build_recent_rate_by_income_binned <- function() {
+  b <- get_block_until_next_header(t5_raw, "Household income")
+  b %>%
+    transmute(
+      raw_group = stringr::str_squish(as.character(.[[1]])),
+      total_t5  = numify(.[[t5_cols$col_total_group]]),
+      recent    = numify(.[[t5_cols$col_recent]])
+    ) %>%
+    filter(raw_group != "") %>%
+    mutate(lo = parse_income_lo(raw_group),
+           bin = bin_from_lo(lo)) %>%
+    filter(!is.na(bin)) %>%
+    group_by(bin) %>%
+    summarise(total_t5 = sum(total_t5, na.rm = TRUE),
+              recent   = sum(recent,   na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(group = factor(bin, levels = income_bins),
+           recent_pct = recent / pmax(total_t5, 1)) %>%
+    select(group, recent_pct, total_t5)
+}
+
+# Y: current LC / Table 5 group total (binned)
+build_lc_current_rate_by_income_binned_t5denom <- function() {
+  b8 <- get_block_until_next_header(t8_raw, "Household income")
+  num <- b8 %>%
+    transmute(
+      raw_group  = stringr::str_squish(as.character(.[[1]])),
+      lc_current = numify(.[[t8_cols$col_lc_total]])
+    ) %>%
+    filter(raw_group != "", !is.na(lc_current)) %>%
+    mutate(lo = parse_income_lo(raw_group),
+           bin = bin_from_lo(lo)) %>%
+    filter(!is.na(bin)) %>%
+    group_by(bin) %>%
+    summarise(lc_current = sum(lc_current, na.rm = TRUE), .groups = "drop") %>%
+    mutate(group = factor(bin, levels = income_bins)) %>%
+    select(group, lc_current)
+
+  den <- build_recent_rate_by_income_binned() %>% select(group, total_t5)
+
+  dplyr::left_join(num, den, by = "group") %>%
+    mutate(lc_pct = lc_current / pmax(total_t5, 1)) %>%
+    select(group, lc_pct)
+}
+
+# Plot (0–100% on both axes, legend on right, rainbow-ish palette)
+plot_bivariate_lc_vs_vax_income_binned <- function() {
+  xdat <- build_recent_rate_by_income_binned()
+  ydat <- build_lc_current_rate_by_income_binned_t5denom()
+  dat  <- dplyr::inner_join(xdat %>% select(group, recent_pct),
+                            ydat %>% select(group, lc_pct),
+                            by = "group")
+
+  pal <- c(
+    "<25k"            = "#FF6B6B",
+    "25–50k"          = "#FF8C00",
+    "50–100k"         = "#B6C400",
+    "100–150k"        = "#2ECC71",
+    "150–200k"        = "#2F7ED8",
+    "200k and above"  = "#C266FF"
+  )
+
+  ggplot2::ggplot(dat, ggplot2::aes(x = recent_pct, y = lc_pct, color = group)) +
+    ggplot2::geom_point(size = 3.8) +
+    ggplot2::scale_color_manual(values = pal, name = NULL) +
+    ggplot2::scale_x_continuous("% vaccinated during/after Sep 2023 (Table 5 group total)",
+                                limits = c(0, 1), labels = scales::percent) +
+    ggplot2::scale_y_continuous("% with Long COVID (current) among group (Table 5 group total)",
+                                limits = c(0, 1), labels = scales::percent) +
+    ggplot2::labs(
+      title    = "Long COVID vs Recent Vaccination — Household income (binned)",
+      subtitle = "Both axes use Table 5 'Total' per income bin"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(legend.position = "right")
+}
+
+# ---- Make the plot ----
+plot_bivariate_lc_vs_vax_income_binned()
+
+
+```
+
